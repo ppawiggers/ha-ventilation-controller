@@ -502,6 +502,131 @@ class TestVentilationController(unittest.TestCase):
         self.assertTrue(target.rooms["bathroom"].needs_ventilation)
         self.assertTrue(target.rooms["living_room"].needs_ventilation)
 
+    def test_co2_low_no_ventilation(self):
+        """Test CO2 below threshold doesn't trigger ventilation."""
+        current = SystemState(
+            fan_speed=30,
+            rooms={
+                "bathroom": RoomState(
+                    humidity=60.0, occupied=False, needs_ventilation=False
+                ),
+                "living_room": RoomState(
+                    humidity=55.0, co2=750.0, occupied=False, needs_ventilation=False
+                ),
+            },
+        )
+
+        target = self.controller.calculate_required_state(current)
+
+        # Fan should be at minimum (CO2 below 600 ppm threshold)
+        self.assertEqual(target.fan_speed, 30)
+
+    def test_co2_medium_partial_ventilation(self):
+        """Test CO2 at medium level triggers proportional fan speed."""
+        current = SystemState(
+            fan_speed=30,
+            rooms={
+                "bathroom": RoomState(
+                    humidity=60.0, occupied=False, needs_ventilation=False
+                ),
+                "living_room": RoomState(
+                    humidity=55.0, co2=1150.0, occupied=False, needs_ventilation=False
+                ),
+            },
+        )
+
+        target = self.controller.calculate_required_state(current)
+
+        # CO2 1150 ppm = 50% between 600-1500, so ~50% fan demand
+        # Actual speed should be around 50% (calculated as (1150-600)/(1500-600) * 100 = 50%)
+        self.assertGreater(target.fan_speed, 30)
+        self.assertLess(target.fan_speed, 100)
+
+    def test_co2_high_full_ventilation(self):
+        """Test high CO2 triggers maximum fan speed."""
+        current = SystemState(
+            fan_speed=30,
+            rooms={
+                "bathroom": RoomState(
+                    humidity=60.0, occupied=False, needs_ventilation=False
+                ),
+                "living_room": RoomState(
+                    humidity=55.0, co2=1600.0, occupied=False, needs_ventilation=False
+                ),
+            },
+        )
+
+        target = self.controller.calculate_required_state(current)
+
+        # CO2 above 1500 ppm should demand 100% fan speed
+        self.assertEqual(target.fan_speed, 100)
+
+    def test_co2_and_humidity_combined(self):
+        """Test combined CO2 and humidity demands add together."""
+        current = SystemState(
+            fan_speed=30,
+            rooms={
+                "bathroom": RoomState(
+                    humidity=75.0, occupied=False, needs_ventilation=False
+                ),
+                "living_room": RoomState(
+                    humidity=55.0, co2=1150.0, occupied=False, needs_ventilation=False
+                ),
+            },
+        )
+
+        target = self.controller.calculate_required_state(current)
+
+        # Humidity demands 100%, CO2 demands ~50%, combined should be 100% (capped)
+        self.assertEqual(target.fan_speed, 100)
+        self.assertTrue(target.rooms["bathroom"].needs_ventilation)
+
+    def test_co2_valve_opens(self):
+        """Test valve opens when CO2 is high even without humidity demand."""
+        current = SystemState(
+            fan_speed=30,
+            rooms={
+                "bathroom": RoomState(
+                    humidity=60.0, occupied=False, needs_ventilation=False
+                ),
+                "living_room": RoomState(
+                    humidity=55.0, co2=1200.0, occupied=False, needs_ventilation=False
+                ),
+            },
+        )
+
+        target = self.controller.calculate_required_state(current)
+
+        # Living room valve should be open due to CO2
+        self.assertEqual(target.rooms["living_room"].valve_position, 100)
+        # Bathroom valve should be at default (no CO2 sensor, no humidity demand)
+        self.assertEqual(
+            target.rooms["bathroom"].valve_position,
+            self.config.get_room_default_valve_position("bathroom"),
+        )
+
+    def test_realistic_scenario_high_co2_while_occupied(self):
+        """Test realistic scenario: High CO2 in occupied living room."""
+        current = SystemState(
+            fan_speed=30,
+            rooms={
+                "bathroom": RoomState(
+                    humidity=60.0, occupied=False, needs_ventilation=False
+                ),
+                "living_room": RoomState(
+                    humidity=55.0, co2=1300.0, occupied=True, needs_ventilation=False
+                ),
+            },
+        )
+
+        target = self.controller.calculate_required_state(current)
+
+        # Fan should run even though living room is occupied (CO2 ventilation continues)
+        # CO2 at 1300 ppm = ~71% demand
+        self.assertGreater(target.fan_speed, 30)
+        # Living room valve should be open
+        self.assertEqual(target.rooms["living_room"].valve_position, 100)
+
 
 if __name__ == "__main__":
     unittest.main()

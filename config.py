@@ -12,6 +12,7 @@ class RoomConfig:
     valve_entity: str
     humidity_sensor: str
     presence_sensor: str = None  # Optional presence detection
+    co2_sensor: str = None  # Optional CO2 detection
 
     # Room-specific thresholds (can override defaults)
     humidity_threshold_on: float = None
@@ -29,6 +30,10 @@ class VentilationConfig:
     # Default humidity thresholds
     humidity_threshold_on: float = 70.0  # Turn on fan when exceeded
     humidity_threshold_off: float = 65.0  # Turn off fan when below
+
+    # CO2 thresholds (ppm)
+    co2_threshold_min: float = 600.0  # Start increasing fan speed
+    co2_threshold_max: float = 1500.0  # Maximum fan speed
 
     # Fan settings
     fan_entity: str = "fan.open_air_mini_e0e308_open_air_mini"
@@ -58,6 +63,7 @@ class VentilationConfig:
                     name="Living Room",
                     valve_entity="valve.open_air_valve_5_217090_open_air_valve_5_valve",
                     humidity_sensor="sensor.open_air_valve_5_217090_open_air_valve_5_humidity",
+                    co2_sensor="sensor.open_air_valve_5_217090_open_air_valve_5_co2",
                     default_valve_position=50,
                 ),
             }
