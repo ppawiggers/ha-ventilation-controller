@@ -51,7 +51,7 @@ class VentilationConfig:
                     name="Bathroom",
                     valve_entity="valve.open_air_valve_2_21718c_open_air_valve_2_valve",
                     humidity_sensor="sensor.open_air_valve_2_21718c_open_air_valve_2_humidity",
-                    presence_sensor="input_boolean.aanwezigheid_badkamer",
+                    presence_sensor="light.spots_badkamer",
                     skip_when_occupied=True,  # Don't ventilate when someone is showering
                 ),
                 "living_room": RoomConfig(

@@ -41,7 +41,15 @@ class VentilationController:
 
         occupied = False
         if room_config.presence_sensor:
-            occupied = self.ha.get_state(room_config.presence_sensor) == "on"
+            if room_config.presence_sensor.startswith("light."):
+                # For lights, check brightness attribute (0 = off, >0 = on/occupied)
+                brightness = self.ha.get_attribute(
+                    room_config.presence_sensor, "brightness"
+                )
+                occupied = brightness is not None and brightness > 0
+            else:
+                # For other sensors (e.g., input_boolean), check state
+                occupied = self.ha.get_state(room_config.presence_sensor) == "on"
 
         valve_position = self._get_valve_position(room_config.valve_entity)
 
