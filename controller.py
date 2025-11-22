@@ -72,145 +72,201 @@ class VentilationController:
         """Calculate required ventilation settings."""
         logger.info("Calculating required ventilation state")
 
-        # Determine which rooms need ventilation
+        # Calculate ventilation points for each room
         new_rooms = {}
         for room_key, room in current.rooms.items():
-            needs_ventilation = self._room_needs_ventilation(
-                room_key, room, current.fan_speed
-            )
+            # Calculate points from humidity and CO2 (use max)
+            humidity_points = self._calculate_humidity_points(room_key, room.humidity)
+            co2_points = self._calculate_co2_points(room_key, room.co2)
+            ventilation_points = max(humidity_points, co2_points)
+
+            room_config = self.config.rooms[room_key]
+            if ventilation_points > 0:
+                logger.info(
+                    f"{room_config.name}: Total ventilation points = {ventilation_points} "
+                    f"(humidity={humidity_points}, CO2={co2_points})"
+                )
+
             new_rooms[room_key] = RoomState(
                 humidity=room.humidity,
                 co2=room.co2,
                 occupied=room.occupied,
-                valve_position=self._calculate_valve_position(
-                    room_key, needs_ventilation, room.co2
-                ),
-                needs_ventilation=needs_ventilation,
+                valve_position=0,  # Will be calculated after fan speed
+                ventilation_points=ventilation_points,
             )
 
-        # Calculate fan speed
+        # Calculate fan speed (sum of all points)
         fan_speed = self._calculate_fan_speed(new_rooms)
+
+        # Calculate valve positions based on proportional distribution
+        max_room, max_points = SystemState(
+            fan_speed=fan_speed, rooms=new_rooms
+        ).get_max_points_room()
+
+        for room_key, room in new_rooms.items():
+            room.valve_position = self._calculate_valve_position(
+                room_key, room, max_room, max_points, fan_speed
+            )
 
         return SystemState(fan_speed=fan_speed, rooms=new_rooms)
 
-    def _room_needs_ventilation(
-        self, room_key: str, room: RoomState, current_fan_speed: int
-    ) -> bool:
-        """Determine if room needs ventilation with hysteresis."""
-        if room.humidity is None:
-            return False
 
-        threshold_on = self.config.get_room_threshold_on(room_key)
-        threshold_off = self.config.get_room_threshold_off(room_key)
-        room_config = self.config.rooms[room_key]
+    def _calculate_points(
+        self, value: float, mode: str, threshold: float, max_value: float
+    ) -> int:
+        """Calculate ventilation points based on sensor value and configuration.
 
-        # Apply hysteresis based on current state
-        if current_fan_speed >= self.config.high_fan_speed:
-            # Currently ventilating, only stop if humidity drops below lower threshold
-            needs = room.humidity >= threshold_off
-            if not needs:
-                logger.info(
-                    f"{room_config.name}: Humidity {room.humidity}% dropped below "
-                    f"{threshold_off}%, no longer needs ventilation"
-                )
-            else:
-                logger.info(
-                    f"{room_config.name}: Humidity {room.humidity}% still elevated, "
-                    f"needs continued ventilation"
-                )
-        else:
-            # Not currently ventilating, only start if humidity exceeds upper threshold
-            needs = room.humidity > threshold_on
-            if needs:
-                logger.info(
-                    f"{room_config.name}: Humidity {room.humidity}% exceeds "
-                    f"{threshold_on}%, needs ventilation"
-                )
-            else:
-                logger.info(
-                    f"{room_config.name}: Humidity {room.humidity}% within normal range"
-                )
+        Args:
+            value: Sensor value (humidity % or CO2 ppm)
+            mode: "step" or "linear"
+            threshold: Value at which points start being awarded
+            max_value: Value that gives 100 points (linear mode only)
 
-        return needs
-
-    def _calculate_co2_fan_demand(self, co2: float) -> int:
-        """Calculate fan speed demand based on CO2 level (0-100%)."""
-        if co2 is None or co2 < self.config.co2_threshold_min:
+        Returns:
+            Points from 0 to 100
+        """
+        if value is None or value < threshold:
             return 0
 
-        if co2 >= self.config.co2_threshold_max:
+        if mode == "step":
+            # Step function: below threshold = 0, at/above threshold = 100
             return 100
+        elif mode == "linear":
+            # Linear interpolation between threshold and max_value
+            if value >= max_value:
+                return 100
 
-        # Linear interpolation between min and max thresholds
-        ratio = (co2 - self.config.co2_threshold_min) / (
-            self.config.co2_threshold_max - self.config.co2_threshold_min
-        )
-        demand = int(ratio * 100)
+            ratio = (value - threshold) / (max_value - threshold)
+            return int(ratio * 100)
+        else:
+            raise ValueError(f"Unknown points mode: {mode}")
 
-        logger.info(f"CO2 {co2}ppm → {demand}% fan demand")
-        return demand
+    def _calculate_humidity_points(self, room_key: str, humidity: float) -> int:
+        """Calculate humidity-based ventilation points for a room."""
+        mode, threshold, max_value = self.config.get_room_humidity_config(room_key)
+        points = self._calculate_points(humidity, mode, threshold, max_value)
+
+        if points > 0:
+            room_config = self.config.rooms[room_key]
+            logger.info(
+                f"{room_config.name}: Humidity {humidity}% → {points} points "
+                f"({mode} mode, threshold={threshold}%)"
+            )
+
+        return points
+
+    def _calculate_co2_points(self, room_key: str, co2: float) -> int:
+        """Calculate CO2-based ventilation points for a room."""
+        mode, threshold, max_value = self.config.get_room_co2_config(room_key)
+        points = self._calculate_points(co2, mode, threshold, max_value)
+
+        if points > 0:
+            room_config = self.config.rooms[room_key]
+            logger.info(
+                f"{room_config.name}: CO2 {co2}ppm → {points} points "
+                f"({mode} mode, threshold={threshold}ppm)"
+            )
+
+        return points
 
     def _calculate_fan_speed(self, rooms: Dict[str, RoomState]) -> int:
-        """Calculate required fan speed combining humidity and CO2 demands."""
-        # Calculate humidity-based demand
-        ventilation_requested = any(
-            room.needs_ventilation
-            and not (room.occupied and self.config.rooms[room_key].skip_when_occupied)
-            for room_key, room in rooms.items()
-        )
-        humidity_demand = self.config.high_fan_speed if ventilation_requested else 0
-
-        # Calculate CO2-based demand (max across all rooms with CO2 sensors)
-        co2_demand = 0
+        """Calculate required fan speed as sum of all room ventilation points."""
+        # Sum all room points, excluding occupied rooms with skip_when_occupied
+        total_points = 0
         for room_key, room in rooms.items():
-            if room.co2 is not None:
-                room_co2_demand = self._calculate_co2_fan_demand(room.co2)
-                co2_demand = max(co2_demand, room_co2_demand)
+            room_config = self.config.rooms[room_key]
 
-        # Combine demands: add them together, capped at high_fan_speed
-        combined_demand = min(humidity_demand + co2_demand, self.config.high_fan_speed)
+            # Skip points from occupied rooms with skip_when_occupied flag
+            if room.occupied and room_config.skip_when_occupied:
+                if room.ventilation_points > 0:
+                    logger.info(
+                        f"{room_config.name}: {room.ventilation_points} points ignored "
+                        f"(room occupied, skip_when_occupied=True)"
+                    )
+                continue
+
+            total_points += room.ventilation_points
+
+        # Cap at high_fan_speed
+        fan_speed = min(total_points, self.config.high_fan_speed)
 
         # Apply minimum fan speed
-        actual_speed = max(self.config.min_fan_speed, combined_demand)
+        fan_speed = max(self.config.min_fan_speed, fan_speed)
 
-        if humidity_demand > 0 or co2_demand > 0:
+        # Round to nearest 10% to prevent constant adjustments
+        fan_speed = round(fan_speed / 10) * 10
+
+        if total_points > 0:
             logger.info(
-                f"Fan demand: humidity={humidity_demand}%, CO2={co2_demand}%, "
-                f"combined={combined_demand}%, actual={actual_speed}%"
+                f"Fan speed: {total_points} total points → {fan_speed}% "
+                f"(rounded to nearest 10%, min={self.config.min_fan_speed}%, max={self.config.high_fan_speed}%)"
             )
         else:
-            logger.info(
-                f"No ventilation requested, fan at minimum speed {actual_speed}%"
-            )
+            logger.info(f"No ventilation points, fan at minimum speed {fan_speed}%")
 
-        return actual_speed
+        return fan_speed
 
     def _calculate_valve_position(
-        self, room_key: str, needs_ventilation: bool, co2: float = None
+        self,
+        room_key: str,
+        room: RoomState,
+        max_room: str,
+        max_points: int,
+        fan_speed: int,
     ) -> int:
-        """Calculate valve position for a room based on ventilation needs and CO2."""
+        """Calculate valve position based on proportional distribution of points.
+
+        Args:
+            room_key: Key of the room
+            room: Current room state with ventilation points
+            max_room: Room with the highest points
+            max_points: Highest points among all rooms
+            fan_speed: Current fan speed
+
+        Returns:
+            Valve position (0-100%)
+        """
         room_config = self.config.rooms[room_key]
 
-        # Check if CO2 demands ventilation
-        co2_demands_ventilation = False
-        if co2 is not None and co2 >= self.config.co2_threshold_min:
-            co2_demands_ventilation = True
-
-        if needs_ventilation or co2_demands_ventilation:
-            position = self.config.valve_open
-            reason = []
-            if needs_ventilation:
-                reason.append("humidity")
-            if co2_demands_ventilation:
-                reason.append("CO2")
+        # If room has no ventilation points, use default position
+        if room.ventilation_points == 0:
+            position = self.config.get_room_default_valve_position(room_key)
             logger.info(
-                f"{room_config.name}: Needs ventilation ({'/'.join(reason)}), "
+                f"{room_config.name}: No ventilation points, valve at {position}%"
+            )
+            return position
+
+        # If occupied with skip_when_occupied, use default position (avoid breeze)
+        if room.occupied and room_config.skip_when_occupied:
+            position = self.config.get_room_default_valve_position(room_key)
+            logger.info(
+                f"{room_config.name}: Occupied (skip_when_occupied), "
+                f"valve at {position}% (avoiding breeze)"
+            )
+            return position
+
+        # If no room has points, use default
+        if max_points == 0:
+            position = self.config.get_room_default_valve_position(room_key)
+            return position
+
+        # Proportional valve position based on points
+        # Room with max points gets 100%, others get proportional
+        if room_key == max_room:
+            position = 100
+            logger.info(
+                f"{room_config.name}: Highest demand ({room.ventilation_points} points), "
                 f"valve at {position}%"
             )
         else:
-            position = self.config.get_room_default_valve_position(room_key)
+            # Calculate proportional position
+            ratio = room.ventilation_points / max_points
+            position = int(ratio * 100)
+            # Round to nearest 10% to prevent constant adjustments
+            position = round(position / 10) * 10
             logger.info(
-                f"{room_config.name}: No ventilation needed, valve at {position}%"
+                f"{room_config.name}: {room.ventilation_points}/{max_points} points "
+                f"({ratio:.0%}), valve at {position}% (rounded to nearest 10%)"
             )
 
         return position
@@ -220,8 +276,16 @@ class VentilationController:
         logger.info("Applying ventilation state")
         changes_made = False
 
-        # Update fan speed
+        # Get current fan speed before changes
         current_fan = self._get_fan_speed()
+
+        # Collect current valve positions before changes
+        current_valves = {}
+        for room_key, room_state in target.rooms.items():
+            room_config = self.config.rooms[room_key]
+            current_valves[room_key] = self._get_valve_position(room_config.valve_entity)
+
+        # Update fan speed
         if current_fan != target.fan_speed:
             logger.info(f"Fan speed {current_fan}% → {target.fan_speed}%")
             self.ha.call_service(
@@ -232,49 +296,11 @@ class VentilationController:
             )
             changes_made = True
 
-        # Determine primary ventilation room for valve restriction logic
-        primary_room = target.get_primary_room(self.config.co2_threshold_min)
-
-        # Update room valves
+        # Update room valves (positions are already calculated)
         for room_key, room_state in target.rooms.items():
             room_config = self.config.rooms[room_key]
-            current_valve = self._get_valve_position(room_config.valve_entity)
-
-            # Start with calculated position, then apply runtime adjustments
+            current_valve = current_valves[room_key]
             target_valve = room_state.valve_position
-
-            # Check if room needs ventilation (humidity or CO2 based)
-            co2_needs_ventilation = (
-                room_state.co2 is not None
-                and room_state.co2 >= self.config.co2_threshold_min
-            )
-            needs_any_ventilation = (
-                room_state.needs_ventilation or co2_needs_ventilation
-            )
-
-            # Only adjust valves for rooms needing ventilation
-            if needs_any_ventilation:
-                if room_state.occupied and room_config.skip_when_occupied:
-                    # Occupied room with skip_when_occupied: close valve to avoid breeze
-                    target_valve = self.config.get_room_default_valve_position(room_key)
-                    logger.info(
-                        f"{room_config.name}: Occupied, valve at {target_valve}% (avoiding breeze)"
-                    )
-                elif (
-                    target.fan_speed == 0
-                    or target.fan_speed == self.config.min_fan_speed
-                ):
-                    # Fan not running: minimize valve
-                    target_valve = self.config.valve_minimal
-                    logger.info(
-                        f"{room_config.name}: Fan off, valve at {target_valve}%"
-                    )
-                elif primary_room and primary_room != room_key:
-                    # Another room is primary: restrict this valve to concentrate airflow
-                    target_valve = self.config.valve_restricted
-                    logger.info(
-                        f"{room_config.name}: Non-primary room, valve at {target_valve}%"
-                    )
 
             if current_valve != target_valve:
                 logger.info(
@@ -289,6 +315,32 @@ class VentilationController:
                 changes_made = True
 
         logger.info("Applied changes" if changes_made else "No changes needed")
+
+        # Log comprehensive state overview
+        logger.info("=" * 60)
+        logger.info("STATE OVERVIEW")
+        logger.info("=" * 60)
+        logger.info(
+            f"Fan Speed:  {current_fan}% → {target.fan_speed}% "
+            f"{'(changed)' if current_fan != target.fan_speed else '(unchanged)'}"
+        )
+        logger.info("-" * 60)
+        logger.info(f"{'Room':<20} {'Points':<10} {'Valve Position':<20}")
+        logger.info("-" * 60)
+
+        for room_key, room_state in target.rooms.items():
+            room_config = self.config.rooms[room_key]
+            current_valve = current_valves[room_key]
+            target_valve = room_state.valve_position
+            points = room_state.ventilation_points
+
+            valve_change = "→" if current_valve != target_valve else "="
+            logger.info(
+                f"{room_config.name:<20} {points:<10} "
+                f"{current_valve}% {valve_change} {target_valve}%"
+            )
+
+        logger.info("=" * 60)
 
     def _get_valve_position(self, entity_id: str) -> int:
         """Get current valve position."""
