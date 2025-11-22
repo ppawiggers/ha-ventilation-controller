@@ -110,7 +110,6 @@ class VentilationController:
 
         return SystemState(fan_speed=fan_speed, rooms=new_rooms)
 
-
     def _calculate_points(
         self, value: float, mode: str, threshold: float, max_value: float
     ) -> int:
@@ -274,6 +273,12 @@ class VentilationController:
     def apply_state(self, target: SystemState):
         """Apply calculated state to Home Assistant."""
         logger.info("Applying ventilation state")
+
+        # Check manual override
+        manual_override = self.ha.get_state(self.config.manual_override_entity) == "on"
+        if manual_override:
+            logger.info("⚠️  Manual override is ENABLED - skipping all changes")
+
         changes_made = False
 
         # Get current fan speed before changes
@@ -283,46 +288,59 @@ class VentilationController:
         current_valves = {}
         for room_key, room_state in target.rooms.items():
             room_config = self.config.rooms[room_key]
-            current_valves[room_key] = self._get_valve_position(room_config.valve_entity)
-
-        # Update fan speed
-        if current_fan != target.fan_speed:
-            logger.info(f"Fan speed {current_fan}% → {target.fan_speed}%")
-            self.ha.call_service(
-                "fan",
-                "set_percentage",
-                entity_id=self.config.fan_entity,
-                percentage=target.fan_speed,
+            current_valves[room_key] = self._get_valve_position(
+                room_config.valve_entity
             )
-            changes_made = True
 
-        # Update room valves (positions are already calculated)
-        for room_key, room_state in target.rooms.items():
-            room_config = self.config.rooms[room_key]
-            current_valve = current_valves[room_key]
-            target_valve = room_state.valve_position
-
-            if current_valve != target_valve:
-                logger.info(
-                    f"{room_config.name}: Valve {current_valve}% → {target_valve}%"
-                )
+        # Only apply changes if manual override is disabled
+        if not manual_override:
+            # Update fan speed
+            if current_fan != target.fan_speed:
+                logger.info(f"Fan speed {current_fan}% → {target.fan_speed}%")
                 self.ha.call_service(
-                    "valve",
-                    "set_valve_position",
-                    entity_id=room_config.valve_entity,
-                    position=target_valve,
+                    "fan",
+                    "set_percentage",
+                    entity_id=self.config.fan_entity,
+                    percentage=target.fan_speed,
                 )
                 changes_made = True
 
-        logger.info("Applied changes" if changes_made else "No changes needed")
+            # Update room valves (positions are already calculated)
+            for room_key, room_state in target.rooms.items():
+                room_config = self.config.rooms[room_key]
+                current_valve = current_valves[room_key]
+                target_valve = room_state.valve_position
+
+                if current_valve != target_valve:
+                    logger.info(
+                        f"{room_config.name}: Valve {current_valve}% → {target_valve}%"
+                    )
+                    self.ha.call_service(
+                        "valve",
+                        "set_valve_position",
+                        entity_id=room_config.valve_entity,
+                        position=target_valve,
+                    )
+                    changes_made = True
+
+            logger.info("Applied changes" if changes_made else "No changes needed")
 
         # Log comprehensive state overview
         logger.info("=" * 60)
-        logger.info("STATE OVERVIEW")
+        logger.info(
+            "STATE OVERVIEW"
+            + (" (MANUAL MODE - NOT APPLIED)" if manual_override else "")
+        )
         logger.info("=" * 60)
+
+        if manual_override:
+            logger.info("Manual override is enabled - automatic control disabled")
+            logger.info("Current settings will be maintained")
+            logger.info("-" * 60)
+
         logger.info(
             f"Fan Speed:  {current_fan}% → {target.fan_speed}% "
-            f"{'(changed)' if current_fan != target.fan_speed else '(unchanged)'}"
+            f"{'(would change)' if manual_override and current_fan != target.fan_speed else '(changed)' if current_fan != target.fan_speed else '(unchanged)'}"
         )
         logger.info("-" * 60)
         logger.info(f"{'Room':<20} {'Points':<10} {'Valve Position':<20}")
@@ -334,7 +352,13 @@ class VentilationController:
             target_valve = room_state.valve_position
             points = room_state.ventilation_points
 
-            valve_change = "→" if current_valve != target_valve else "="
+            if manual_override and current_valve != target_valve:
+                valve_change = "→?"  # Would change if manual mode was off
+            elif current_valve != target_valve:
+                valve_change = "→"  # Changed
+            else:
+                valve_change = "="  # No change
+
             logger.info(
                 f"{room_config.name:<20} {points:<10} "
                 f"{current_valve}% {valve_change} {target_valve}%"

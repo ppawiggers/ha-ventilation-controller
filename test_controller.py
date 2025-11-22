@@ -238,7 +238,9 @@ class TestVentilationController(unittest.TestCase):
             fan_speed=30,
             rooms={
                 "bathroom": RoomState(humidity=75.0, occupied=False),  # 100 points
-                "living_room": RoomState(humidity=55.0, co2=1050.0, occupied=False),  # 50 points
+                "living_room": RoomState(
+                    humidity=55.0, co2=1050.0, occupied=False
+                ),  # 50 points
             },
         )
 
@@ -409,7 +411,9 @@ class TestVentilationController(unittest.TestCase):
             fan_speed=30,
             rooms={
                 "bathroom": RoomState(humidity=75.0, occupied=False),  # 100 points
-                "living_room": RoomState(humidity=55.0, co2=1050.0, occupied=False),  # 50 points
+                "living_room": RoomState(
+                    humidity=55.0, co2=1050.0, occupied=False
+                ),  # 50 points
             },
         )
 
@@ -473,7 +477,9 @@ class TestVentilationController(unittest.TestCase):
             fan_speed=30,
             rooms={
                 "bathroom": RoomState(humidity=75.0, occupied=False),  # 50 points
-                "living_room": RoomState(humidity=55.0, co2=900.0, occupied=False),  # 33 points
+                "living_room": RoomState(
+                    humidity=55.0, co2=900.0, occupied=False
+                ),  # 33 points
             },
         )
 

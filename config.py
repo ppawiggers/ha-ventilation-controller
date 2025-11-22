@@ -49,6 +49,9 @@ class VentilationConfig:
     min_fan_speed: int = 30
     high_fan_speed: int = 100
 
+    # Manual override switch
+    manual_override_entity: str = "input_boolean.handmatige_ventilatie"
+
     # Valve positions
     valve_open: int = 100
     valve_minimal: int = 10
