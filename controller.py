@@ -263,9 +263,11 @@ class VentilationController:
             position = int(ratio * 100)
             # Round to nearest 10% to prevent constant adjustments
             position = round(position / 10) * 10
+            # Ensure at least minimum opening when valve is active
+            position = max(position, self.config.valve_minimal)
             logger.info(
                 f"{room_config.name}: {room.ventilation_points}/{max_points} points "
-                f"({ratio:.0%}), valve at {position}% (rounded to nearest 10%)"
+                f"({ratio:.0%}), valve at {position}% (rounded to nearest 10%, min {self.config.valve_minimal}%)"
             )
 
         return position
