@@ -1,0 +1,65 @@
+# Global Configuration
+global:
+  # Home Assistant connection
+  homeassistant:
+    url: "https://homeassistant.p10s.cloud"
+
+  # Manual override switch (when on, controller is disabled)
+  manual_override_switch: "input_boolean.handmatige_ventilatie"
+
+  # Global ventilation speed control (0-100)
+  ventilation_speed_entity: "fan.open_air_mini_e0e308_open_air_mini"
+
+# Per-room configuration
+rooms:
+  bathroom:
+    # Humidity sensor for this room
+    humidity_sensor: "sensor.open_air_valve_2_21718c_open_air_valve_2_humidity"
+
+    # Valve position entity (0-100)
+    valve_entity: "valve.open_air_valve_2_21718c_open_air_valve_2_valve"
+
+    # Humidity curve: defines ventilation demand based on humidity difference
+    # demand = min(100, max(0, (humidity - target_humidity) * multiplier))
+    # This makes bathroom more aggressive
+    humidity_curve:
+      target_humidity: 60  # Target humidity level
+      multiplier: 5.0      # Higher = more aggressive response
+
+    # Valve settings
+    valve:
+      min_opening: 20      # Minimal opening during normal use (%)
+      restricted_opening: 10  # Opening when capacity needed elsewhere (%)
+
+  living_room:
+    humidity_sensor: "sensor.open_air_valve_5_217090_open_air_valve_5_humidity"
+    valve_entity: "valve.open_air_valve_5_217090_open_air_valve_5_valve"
+
+    # Living room: less aggressive ventilation
+    humidity_curve:
+      target_humidity: 55
+      multiplier: 2.0      # Lower = less aggressive
+
+    valve:
+      min_opening: 30
+      restricted_opening: 10
+
+#  bedroom:
+#    humidity_sensor: "sensor.bedroom_humidity"
+#    valve_entity: "climate.bedroom_valve"
+#    humidity_curve:
+#      target_humidity: 50
+#      multiplier: 3.0
+#    valve:
+#      min_opening: 20
+#      restricted_opening: 5
+#
+#  kitchen:
+#    humidity_sensor: "sensor.kitchen_humidity"
+#    valve_entity: "climate.kitchen_valve"
+#    humidity_curve:
+#      target_humidity: 50
+#      multiplier: 4.0
+#    valve:
+#      min_opening: 15
+#      restricted_opening: 5

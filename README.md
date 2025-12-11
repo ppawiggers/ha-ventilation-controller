@@ -1,6 +1,6 @@
 # Home Assistant Ventilation Controller
 
-Smart ventilation control based on humidity and occupancy. Manages fan speed and room valves to efficiently remove humidity while avoiding discomfort.
+Simplified smart ventilation control based on humidity levels. Manages fan speed and room valves with proportional control and per-room customization.
 
 ## Quick Start
 
@@ -8,28 +8,81 @@ Smart ventilation control based on humidity and occupancy. Manages fan speed and
 # Setup
 mise trust && mise install
 
+# Configure
+cp config.yaml.example config.yaml
+# Edit config.yaml with your entity IDs
+
 # Run locally
 python main.py
-
-# Run tests
-python test_controller.py
 ```
 
 ## Configuration
 
-Edit `config.py`:
-- Room entity IDs (valves, humidity sensors, presence sensors, CO2 sensors)
-- Humidity thresholds (default: 70% on, 65% off)
-- CO2 thresholds (default: 600 ppm start, 1500 ppm max)
-- Room-specific settings:
-  - `default_valve_position`: Valve position when no ventilation needed
-  - `skip_when_occupied`: Skip ventilation when occupied (bathroom: True, living room: False)
+Edit `config.yaml`:
+
+**Global settings:**
+- Home Assistant URL and token
+- Manual override switch
+- Ventilation fan entity
+
+**Per-room settings:**
+- Humidity sensor entity
+- Valve entity
+- Humidity curve (target, multiplier)
+- Valve positions (min_opening, restricted_opening)
 
 Environment variables in `.env`:
 ```bash
-HA_URL=http://homeassistant.local:8123
-HA_TOKEN=your_token_here
+HA_TOKEN=your_long_lived_access_token
 ```
+
+### Example Room Configuration
+
+```yaml
+bathroom:
+  humidity_sensor: "sensor.bathroom_humidity"
+  valve_entity: "climate.bathroom_valve"
+  humidity_curve:
+    target_humidity: 50      # Target 50%
+    multiplier: 5.0          # Aggressive response
+  valve:
+    min_opening: 10          # Normal minimum
+    restricted_opening: 5    # When capacity needed elsewhere
+```
+
+## How It Works
+
+### Humidity-Based Demand
+Each room calculates ventilation demand based on how far above target:
+```
+demand = max(0, (current_humidity - target_humidity) * multiplier)
+```
+
+- Higher `multiplier` = more aggressive ventilation (e.g., bathroom: 5.0)
+- Lower `multiplier` = gentler ventilation (e.g., living room: 2.0)
+- **Demand can exceed 100%** - it's used for proportional distribution, not directly as fan speed
+
+### Ventilation Speed
+Global fan speed is the **sum of all room demands**, representing total capacity needed:
+```
+fan_speed = min(100%, max(25%, bathroom_demand + living_room_demand + ...))
+```
+
+- Minimum 25% for baseline airflow
+- Maximum 100% (capped)
+- Capacity is divided proportionally via valve positions
+
+### Proportional Valve Positioning
+Valves open proportionally to each room's share of total demand:
+- Bathroom needs 80 points, Living room needs 50 points
+- Total = 130 points
+- Bathroom valve: 62% (80/130)
+- Living room valve: 38% (50/130)
+
+This ensures airflow goes where it's needed most, while respecting minimum opening constraints.
+
+### Manual Override
+When the manual override switch is enabled, the system reads state but doesn't make any changes.
 
 ## Deployment
 
@@ -44,62 +97,13 @@ docker push bitlayer/ventilation-controller:$(date +%Y%m%d)
 kubectl apply -f k8s/cronjob.yaml
 ```
 
-## How It Works
+## Key Features
 
-- **Hysteresis**: Prevents rapid cycling (70% to turn on, 65% to turn off)
-- **CO2-based control**: Smooth fan speed adjustment based on CO2 levels (600-1500 ppm)
-- **Combined demands**: Humidity and CO2 demands are added together for optimal air quality
-- **Occupancy-aware**: Bathroom valve closes when occupied (no breeze while showering)
-- **Smart valves**: Concentrates airflow where needed, maintains baseline positions elsewhere
-- **Minimum fan speed**: Always 30% for baseline ventilation
-
-See [CLAUDE.md](CLAUDE.md) for detailed architecture and control logic.
-
-## Supported Scenarios
-
-The controller intelligently handles:
-
-**Basic Ventilation**
-- No ventilation needed (all rooms normal humidity)
-- Single room needs ventilation
-- Multiple rooms need ventilation simultaneously
-
-**Hysteresis Control**
-- Activates when humidity exceeds upper threshold (>70%)
-- Remains off when humidity stays below upper threshold (≤70%)
-- Continues running when humidity above lower threshold (≥65%)
-- Deactivates when humidity drops below lower threshold (<65%)
-- Handles gradual humidity changes without cycling
-
-**Occupancy-Aware Ventilation**
-- Bathroom: Skips ventilation while occupied (no breeze during shower)
-- Living room: Continues ventilation while occupied (e.g., during cooking)
-- Mixed: Ventilates unoccupied rooms while respecting occupied room preferences
-
-**Smart Valve Management**
-- Maintains room-specific default positions (bathroom 20%, living room 50%)
-- Closes occupied bathroom valve to avoid breeze
-- Fully opens primary room valve (100%)
-- Restricts non-primary room valves (20%) to concentrate airflow
-
-**Real-World Use Cases**
-- Showering: Detects high humidity but skips ventilation while occupied
-- Post-shower: Automatically ventilates once person leaves
-- Cooking: Ventilates living room even while occupied
-- Simultaneous events: Manages multiple rooms with different states
-
-**CO2-Based Ventilation**
-- Monitors CO2 levels in parts per million (ppm)
-- Smooth fan speed increase from 600 ppm to 1500 ppm
-- Combines with humidity demands (added together, capped at 100%)
-- Opens valves when CO2 exceeds threshold
-- Continues ventilation even when room is occupied
-
-**Advanced Configuration**
-- Custom humidity thresholds per room
-- Custom CO2 thresholds (default: 600-1500 ppm)
-- Room-specific valve positioning strategies
-- Light-based occupancy detection (brightness > 0% = occupied)
+- **Simple & Predictable**: Linear relationship between humidity and ventilation
+- **Per-Room Control**: Each room has its own target and response curve
+- **Proportional Distribution**: Valve positions based on demand share
+- **No Complex State**: No hysteresis, no occupancy detection, no CO2
+- **Declarative Config**: Add rooms without touching code
 
 ## Monitoring
 
@@ -107,3 +111,7 @@ Check logs in Home Assistant or K3s:
 ```bash
 kubectl logs -l app=ventilation-controller --tail=100
 ```
+
+## Architecture
+
+See [CLAUDE.md](CLAUDE.md) for detailed architecture, control algorithms, and design principles.

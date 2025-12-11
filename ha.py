@@ -42,19 +42,6 @@ class HomeAssistantAPI:
             print(f"Error calling {domain}.{service}: {e}")
             return False
 
-    def set_state(self, entity_id: str, state: str, attributes: dict = None) -> bool:
-        try:
-            url = f"{self.ha_url}/api/states/{entity_id}"
-            data = {"state": state, "attributes": attributes or {}}
-            response = requests.post(
-                url, headers=self.headers, json=data, timeout=self.timeout
-            )
-            response.raise_for_status()
-            return True
-        except requests.RequestException as e:
-            print(f"Error setting state for {entity_id}: {e}")
-            return False
-
     def get_attribute(self, entity_id: str, attribute: str):
         """Get a specific attribute value from an entity."""
         try:

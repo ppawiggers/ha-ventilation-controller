@@ -4,7 +4,7 @@ import os
 import logging
 
 from ha import HomeAssistantAPI
-from config import VentilationConfig
+from config import load_config
 from controller import VentilationController
 
 
@@ -68,21 +68,24 @@ def main():
     logger_provider = setup_logging()
 
     try:
-        # Initialize components
-        logger.info("Initializing ventilation control system")
+        # Load configuration
+        logger.info("Loading configuration")
+        config = load_config()
 
+        # Initialize Home Assistant API
+        logger.info("Initializing Home Assistant connection")
         ha = HomeAssistantAPI(
-            ha_url=os.environ["HA_URL"],
-            ha_token=os.environ["HA_TOKEN"],
+            ha_url=config.global_config.homeassistant_url,
+            ha_token=config.global_config.homeassistant_token,
         )
 
-        config = VentilationConfig()
-        controller = VentilationController(ha, config)
+        # Initialize controller
+        logger.info("Initializing ventilation controller")
+        controller = VentilationController(config, ha)
 
         # Execute control cycle
-        current_state = controller.read_current_state()
-        target_state = controller.calculate_required_state(current_state)
-        controller.apply_state(target_state)
+        logger.info("Running control cycle")
+        controller.run_control_cycle()
 
         logger.info("Ventilation control cycle completed")
     finally:
