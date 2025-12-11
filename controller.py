@@ -94,13 +94,16 @@ class VentilationController:
 
         Sums all room demands (total capacity needed), with a minimum of 25%.
         The capacity is then divided proportionally via valve positions.
+        Rounded to nearest 10% to avoid frequent small changes.
         """
         if not rooms:
-            return 25
+            return 30  # Rounded to nearest 10
 
         total_demand = sum(room.demand for room in rooms.values())
         # Ensure minimum 25% for baseline airflow, cap at 100%
-        return int(round(min(100, max(25, total_demand))))
+        speed = min(100, max(25, total_demand))
+        # Round to nearest 10% to avoid frequent small changes
+        return int(round(speed / 10) * 10)
 
     def calculate_valve_positions(
         self, rooms: Dict[str, RoomState], room_configs: Dict[str, RoomConfig]
@@ -110,6 +113,7 @@ class VentilationController:
 
         Each room's valve position is proportional to its share of total demand,
         but respecting minimum and restricted opening constraints.
+        All positions rounded to nearest 10% to avoid frequent small changes.
         """
         # Calculate total demand
         total_demand = sum(room.demand for room in rooms.values())
@@ -119,7 +123,8 @@ class VentilationController:
         if total_demand == 0:
             # No demand: all valves at minimal opening
             for room_key, room_config in room_configs.items():
-                valve_positions[room_key] = room_config.valve.min_opening
+                min_pos = room_config.valve.min_opening
+                valve_positions[room_key] = int(round(min_pos / 10) * 10)
         else:
             # Proportional distribution based on demand
             for room_key, room_state in rooms.items():
@@ -127,13 +132,14 @@ class VentilationController:
 
                 if room_state.demand == 0:
                     # No demand: restricted opening (capacity needed elsewhere)
-                    valve_positions[room_key] = room_config.valve.restricted_opening
+                    restricted_pos = room_config.valve.restricted_opening
+                    valve_positions[room_key] = int(round(restricted_pos / 10) * 10)
                 else:
                     # Proportional to demand, but at least min_opening
-                    proportional = int(round((room_state.demand / total_demand) * 100))
-                    valve_positions[room_key] = max(
-                        room_config.valve.min_opening, proportional
-                    )
+                    proportional = (room_state.demand / total_demand) * 100
+                    position = max(room_config.valve.min_opening, proportional)
+                    # Round to nearest 10%
+                    valve_positions[room_key] = int(round(position / 10) * 10)
 
         return valve_positions
 
