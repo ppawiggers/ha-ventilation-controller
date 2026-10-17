@@ -1,7 +1,11 @@
+"""Minimal Home Assistant REST API client."""
+
 import requests
 
 
 class HomeAssistantAPI:
+    """Reads entity states and calls services via the Home Assistant REST API."""
+
     def __init__(self, ha_url: str, ha_token: str):
         self.ha_url = ha_url.rstrip("/")
         self.headers = {
@@ -11,6 +15,7 @@ class HomeAssistantAPI:
         self.timeout = 10
 
     def get_state(self, entity_id: str):
+        """Get an entity's state as float when numeric, else as string (None if unavailable)."""
         try:
             url = f"{self.ha_url}/api/states/{entity_id}"
             response = requests.get(url, headers=self.headers, timeout=self.timeout)
@@ -31,6 +36,7 @@ class HomeAssistantAPI:
             return None
 
     def call_service(self, domain: str, service: str, **kwargs) -> bool:
+        """Call a Home Assistant service; returns whether the call succeeded."""
         try:
             url = f"{self.ha_url}/api/services/{domain}/{service}"
             response = requests.post(

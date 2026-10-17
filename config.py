@@ -1,10 +1,9 @@
 """Configuration loader for ventilation control system."""
 
 import os
-import re
 import yaml
 from dataclasses import dataclass
-from typing import Dict, Any
+from typing import Dict, Optional
 
 
 @dataclass
@@ -29,6 +28,7 @@ class RoomConfig:
 
     name: str
     humidity_sensor: str
+    temperature_sensor: Optional[str]
     valve_entity: str
     humidity_curve: HumidityCurve
     valve: ValveConfig
@@ -40,8 +40,12 @@ class GlobalConfig:
 
     homeassistant_url: str
     homeassistant_token: str
-    manual_override_switch: str
+    automatic_ventilation_switch: str
     ventilation_speed_entity: str
+    minimum_fan_speed: int
+    outside_weather_entity: Optional[str]
+    outside_humidity_margin: float
+    max_target_humidity: float
 
 
 @dataclass
@@ -62,8 +66,12 @@ def load_config(config_path: str = "config.yaml") -> Config:
     global_config = GlobalConfig(
         homeassistant_url=global_raw["homeassistant"]["url"],
         homeassistant_token=os.getenv("HA_TOKEN"),
-        manual_override_switch=global_raw["manual_override_switch"],
+        automatic_ventilation_switch=global_raw["automatic_ventilation_switch"],
         ventilation_speed_entity=global_raw["ventilation_speed_entity"],
+        minimum_fan_speed=global_raw["minimum_fan_speed"],
+        outside_weather_entity=global_raw.get("outside_weather_entity"),
+        outside_humidity_margin=global_raw.get("outside_humidity_margin", 5),
+        max_target_humidity=global_raw.get("max_target_humidity", 80),
     )
 
     # Parse room configs
@@ -75,6 +83,7 @@ def load_config(config_path: str = "config.yaml") -> Config:
         rooms[room_key] = RoomConfig(
             name=room_key.replace("_", " ").title(),
             humidity_sensor=room_raw["humidity_sensor"],
+            temperature_sensor=room_raw.get("temperature_sensor"),
             valve_entity=room_raw["valve_entity"],
             humidity_curve=HumidityCurve(
                 target_humidity=curve_raw["target_humidity"],

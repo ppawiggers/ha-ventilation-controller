@@ -6,7 +6,7 @@ from config import load_config
 
 
 def calculate_demand(humidity: float, target: float, multiplier: float) -> float:
-    """Calculate demand for a given humidity level."""
+    """Calculate demand for a given humidity level, capped at 100 for plotting."""
     humidity_diff = humidity - target
     demand = humidity_diff * multiplier
     return max(0.0, min(100.0, demand))
@@ -45,8 +45,13 @@ def plot_demand_curves():
         )
 
     # Add minimum fan speed line
+    min_speed = config.global_config.minimum_fan_speed
     plt.axhline(
-        y=25, color="gray", linestyle=":", linewidth=1, label="Min fan speed (25%)"
+        y=min_speed,
+        color="gray",
+        linestyle=":",
+        linewidth=1,
+        label=f"Min fan speed ({min_speed}%)",
     )
 
     # Formatting

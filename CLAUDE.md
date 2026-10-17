@@ -4,37 +4,40 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Simplified Home Assistant-controlled ventilation system that manages fan speed and room valves based on humidity levels. The system calculates proportional valve positions based on demand. Designed to run as a containerized cron job in Kubernetes.
+Home Assistant-controlled ventilation system that manages fan speed and room valves based on humidity levels. Valve positions are proportional to each room's demand. Runs once a minute as a Kubernetes CronJob; each run is a fresh process with no state between runs.
 
 ## Development Environment
 
 This project uses `mise` for environment management:
 - Python 3.14 with automatic venv management
-- Environment variables (HA_TOKEN) configured in `mise.toml`, secrets loaded from `.env`
+- `HA_TOKEN` is loaded from `.env` (via `mise.toml`)
 - Activate environment: `mise trust` then `mise install`
+- Lint and format with `ruff check .` and `ruff format .`
 
 ## Running the Application
 
 ```bash
-# Run single control cycle
+# Run single control cycle (applies changes to Home Assistant!)
 python main.py
 
-# Build image
+# Build image (dependencies only; code and config.yaml are mounted from a ConfigMap)
 docker build --platform=linux/amd64 -t bitlayer/ventilation-controller:YYYYMMDD .
 ```
 
 ## Architecture
 
 ### Control Flow
-1. **main.py**: Entry point, loads config and orchestrates single control cycle
-2. **config.py**: YAML configuration loader with environment variable support
-3. **controller.py**: Core control logic implementing:
+1. **main.py**: Entry point, sets up logging (stdout + optional OpenTelemetry) and runs a single control cycle
+2. **config.py**: Loads `config.yaml` into dataclasses; `HA_TOKEN` comes from the environment
+3. **controller.py**: Core control logic:
    - State reading from Home Assistant
-   - Humidity-based demand calculation with outside humidity adjustment
-   - Proportional valve position calculation
+   - Outside air adjustment of the target humidity
+   - Humidity-based demand calculation
+   - Fan speed and proportional valve position calculation
    - State application back to Home Assistant
 4. **ha.py**: Home Assistant REST API client wrapper
 5. **config.yaml**: Declarative configuration for global settings and per-room behavior
+6. **visualize_demand.py**: Dev tool that plots demand curves to `demand_curves.png`
 
 ### Key Control Logic
 
@@ -43,14 +46,12 @@ docker build --platform=linux/amd64 -t bitlayer/ventilation-controller:YYYYMMDD 
 The system calculates ventilation demand per room based on how far the room's humidity is above target:
 
 ```python
-# Calculate demand
 humidity_diff = room_humidity - target_humidity
-demand = humidity_diff * multiplier
-demand = max(0, demand)  # No upper limit!
+demand = max(0, humidity_diff * multiplier)  # No upper limit!
 ```
 
 **Key parameters** (configured per room):
-- `target_humidity`: Desired humidity level (e.g., 50%)
+- `target_humidity`: Base humidity target (e.g., 60%), may be raised by the outside air adjustment
 - `multiplier`: How aggressively to respond (higher = more aggressive)
 
 **Important**: Demand can exceed 100! This is intentional - demand represents "how much this room needs" and is used for proportional valve distribution. The fan speed is capped at 100%, but individual room demands are not.
@@ -58,60 +59,62 @@ demand = max(0, demand)  # No upper limit!
 **Example:**
 - Bathroom: 80% humidity, target 50%, multiplier 5.0 → demand = (80-50) × 5.0 = **150**
 - Living room: 75% humidity, target 55%, multiplier 2.0 → demand = (75-55) × 2.0 = **40**
-- Total demand: 150 + 40 = 190
-- Fan speed: min(100%, 190) = **100%**
-- Bathroom valve: 150/190 = **79%** of capacity
-- Living room valve: 40/190 = **21%** of capacity
+- Fan speed: min(100%, 150 + 40) = **100%**
+- Bathroom valve: 150/150 = **100%**
+- Living room valve: 40/150 = **27% → 30%**
 
-This ensures rooms with higher demand get proportionally more airflow.
+#### Outside Air Adjustment
+
+`target_humidity` in config is a **base** target. Ventilating can't bring a room below the RH that outside air has once it is brought to room temperature, so `effective_target_humidity()` raises the target per room:
+
+```python
+reachable = outside_rh * es(outside_temp) / es(room_temp)  # Magnus formula
+target = max(base_target, min(reachable + outside_humidity_margin, max_target_humidity))
+```
+
+Outside data is read from the `outside_weather_entity` attributes (`temperature`, `humidity`); room temperature from the room's `temperature_sensor`. If any value is missing, the base target is used. This prevents the fan running at 100% continuously in wet, mild weather. No caching is needed: Home Assistant's weather integration already caches the forecast.
 
 #### Ventilation Speed Calculation
 
-Global ventilation speed is the **sum of all room demands**, with a **minimum of 25%** and **maximum of 100%**:
+Global ventilation speed is the **sum of all room demands**, between `minimum_fan_speed` and 100%, rounded to 10%:
 
 ```python
 total_demand = sum(room.demand for room in rooms)
-ventilation_speed = min(100, max(25, total_demand))
+ventilation_speed = min(100, max(minimum_fan_speed, total_demand))
 ```
 
-This represents the total capacity needed by all rooms combined. The capacity is then divided proportionally via valve positions.
-
-Example:
-- Bathroom needs 30 points, Living room needs 20 points
-- Total capacity needed: 30 + 20 = 50%
-- Bathroom gets 30/50 = 60% of capacity (valve position)
-- Living room gets 20/50 = 40% of capacity (valve position)
+This represents the total capacity needed by all rooms combined. The capacity is divided via the valve positions.
 
 #### Proportional Valve Positioning
 
-Valves are positioned **proportionally to each room's share of total demand**:
+Valves are positioned **proportionally to each room's demand relative to the highest room demand**, rounded to 10%:
 
 ```python
-total_demand = sum(room.demand for room in rooms)
+max_demand = max(room.demand for room in rooms)
 
-if total_demand == 0:
+if max_demand == 0:
     # No demand: all valves at minimal opening
     valve_position = min_opening
 else:
-    if room.demand == 0:
-        # Capacity needed elsewhere: restricted opening
+    proportional = (room.demand / max_demand) * 100
+    if proportional < min_opening:
+        # No or little demand: capacity needed elsewhere
         valve_position = restricted_opening
     else:
-        # Proportional share, but at least min_opening
-        valve_position = max(min_opening, (room.demand / total_demand) * 100)
+        valve_position = proportional
 ```
 
-**Example**:
-- Bathroom needs 80 points, Living room needs 50 points
-- Total = 130 points
-- Bathroom valve = max(10%, 80/130 * 100%) = 62%
-- Living room valve = max(15%, 50/130 * 100%) = 38%
+**Example** (shower):
+- Bathroom needs 150 points, Bathroom 2 needs 22, Living room needs 5
+- Bathroom valve = 150/150 = 100%
+- Bathroom 2 valve = 22/150 = 15% → 10% (rounded)
+- Living room valve = 5/150 = 3% < min_opening → restricted_opening (0%)
 
 This ensures:
-- Airflow goes where it's needed most
-- No room gets 100% unless it's the only one with demand
-- Even low-demand rooms get minimum airflow
-- Rooms without demand get restricted opening (capacity needed elsewhere)
+- The room with the highest demand always opens fully
+- Airflow goes where it's needed most; the fan speed sets the total amount
+- Rooms with little or no demand get restricted opening (capacity needed elsewhere)
+- When no room has demand, all valves stay at min_opening for baseline airflow
 
 ### State Management Pattern
 
@@ -124,18 +127,21 @@ current = read_current_state()  # → SystemState
 # 2. Calculate required state (pure function)
 target = calculate_required_state(current)  # → SystemState
 
-# 3. Apply changes to Home Assistant (side effects)
-apply_state(target)
+# 3. Apply changes to Home Assistant (side effects, only for changed values)
+apply_state(current, target)
 ```
 
 Each room tracks:
 - **humidity**: Current humidity percentage
-- **demand**: Calculated ventilation demand (0-100)
-- **valve_position**: Target valve position (0-100%)
+- **temperature**: Current room temperature (optional)
+- **target_humidity**: Effective target after outside air adjustment
+- **demand**: Calculated ventilation demand (0 or higher, no upper limit)
+- **valve_position**: Valve position (0-100%)
 
 System state tracks:
-- **manual_override**: Boolean override switch state
+- **automatic_ventilation**: Whether the controller may make changes
 - **ventilation_speed**: Global fan speed (0-100%)
+- **outside_temperature** / **outside_humidity**: From the weather entity
 - **rooms**: Dictionary of room states
 
 ### Configuration
@@ -143,13 +149,14 @@ System state tracks:
 Configuration is defined in `config.yaml` with two main sections:
 
 **Global configuration**:
-- Home Assistant URL and token
-- Manual override switch entity
-- Ventilation speed entity (fan)
-- Update interval
+- Home Assistant URL (token from `HA_TOKEN` env var)
+- Automatic ventilation switch entity
+- Ventilation speed entity (fan) and minimum fan speed
+- Outside weather entity, margin and max target (outside air adjustment)
 
 **Per-room configuration**:
 - Humidity sensor entity
+- Temperature sensor entity (optional)
 - Valve entity
 - Humidity curve (target, multiplier)
 - Valve settings (min_opening, restricted_opening)
@@ -158,46 +165,49 @@ Example room config:
 ```yaml
 bathroom:
   humidity_sensor: "sensor.bathroom_humidity"
-  valve_entity: "climate.bathroom_valve"
+  temperature_sensor: "sensor.bathroom_temperature"  # Optional
+  valve_entity: "valve.bathroom"
   humidity_curve:
-    target_humidity: 50      # Target 50%
+    target_humidity: 60      # Base target 60%
     multiplier: 5.0          # Aggressive response
   valve:
-    min_opening: 10          # Normal minimum
-    restricted_opening: 5    # When capacity needed elsewhere
+    min_opening: 10          # When no room has demand
+    restricted_opening: 0    # When capacity needed elsewhere
 ```
 
 ### Control Algorithm Summary
 
 For each control cycle:
 
-1. **Read state**: Fetch manual override, current fan speed, and room humidity levels
-2. **Check override**: If manual override active, skip control logic
-3. **Calculate demands**: For each room, calculate demand based on humidity above target
-4. **Calculate fan speed**: Use maximum demand across all rooms
-5. **Calculate valve positions**: Proportional distribution based on demand share
-6. **Apply changes**: Send fan speed and valve positions to Home Assistant
-7. **Log state**: Print readable summary of current and target states
+1. **Read state**: Fetch automatic ventilation switch, fan speed, outside weather, and per room humidity, temperature and valve position
+2. **Check switch**: If automatic ventilation is off, change nothing
+3. **Calculate demands**: For each room, raise the target for outside air if needed, then calculate demand based on humidity above target
+4. **Calculate fan speed**: Sum of all room demands, between minimum and 100%
+5. **Calculate valve positions**: Proportional to demand relative to the highest demand
+6. **Log state**: Print readable summary of current and target states
+7. **Apply changes**: Send changed fan speed and valve positions to Home Assistant
 
 ## Dependencies
 
 - `pyyaml`: YAML configuration parsing
 - `requests`: Home Assistant API calls
+- `opentelemetry-*`: Optional log export (when `OTEL_EXPORTER_OTLP_ENDPOINT` is set)
 
 ## Home Assistant Integration
 
 Expects Home Assistant entities:
-- Fan entity with `percentage` attribute (fan domain)
-- Valve entities with `number.set_value` service (number domain)
-- Humidity sensors returning numeric state
-- Manual override switch (input_boolean)
+- Fan entity with `percentage` attribute, set via `fan.turn_on`
+- Valve entities with `current_position` attribute, set via `valve.set_valve_position`
+- Humidity and temperature sensors returning numeric state
+- Weather entity with `temperature` and `humidity` attributes
+- Automatic ventilation switch (`input_boolean`)
 
-API calls use Bearer token authentication from config.
+API calls use Bearer token authentication with `HA_TOKEN`.
 
 ## Key Design Principles
 
 1. **Simplicity**: Single control mode (humidity only), no complex state machines
-2. **Configurability**: All thresholds and formulas configurable per room
+2. **Configurability**: All thresholds configurable per room
 3. **Proportional control**: Gradual response, no hard on/off switching
 4. **Fair distribution**: Valve positions proportional to demand
 5. **Pure functions**: Core logic is a pure function for predictability
